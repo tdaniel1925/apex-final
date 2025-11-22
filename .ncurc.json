@@ -1,0 +1,10 @@
+{
+  "reject": [
+    "react",
+    "react-dom"
+  ],
+  "target": "minor",
+  "upgrade": true,
+  "doctor": true,
+  "doctorTest": "npm run test:unit && npm run type-check"
+}

@@ -1,0 +1,18 @@
+{
+  "atLeast": 95,
+  "strict": true,
+  "ignoreFiles": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/tests/**",
+    "**/*.config.ts",
+    "**/*.config.js",
+    "**/node_modules/**",
+    "**/.next/**"
+  ],
+  "ignoreCatch": false,
+  "ignoreUnreadAnys": false,
+  "cache": true
+}

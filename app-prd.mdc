@@ -1,0 +1,2401 @@
+---
+alwaysApply: true
+---
+# Product Requirements Document
+## Apex Affinity Group - MLM Platform
+
+**Version:** 1.0  
+**Date:** November 21, 2025  
+**Project Code:** AAG-MLM-001  
+**Status:** Development Ready
+
+---
+
+## Executive Summary
+
+Apex Affinity Group requires a complete multi-tenant MLM (Multi-Level Marketing) platform with replicated websites, a 5x9 forced matrix compensation plan, and comprehensive back-office management. The platform will enable distributors to sell digital products/services, recruit team members, and earn commissions through retail profits, matrix bonuses, rank achievements, and matching bonuses.
+
+### Key Objectives
+- Launch MVP for distributor demonstrations within 8-10 weeks
+- Enable automated distributor onboarding with replicated websites
+- Implement 5x9 forced matrix with automated genealogy tracking
+- Provide real-time commission calculations and automated payouts via Stripe
+- Support corporate content control with distributor photo/name customization
+
+---
+
+## Technical Stack
+
+### Frontend
+- **Framework:** Next.js 14+ (App Router)
+- **UI Library:** React 18+
+- **Component Library:** shadcn/ui (Radix UI + Tailwind CSS)
+- **Styling:** Tailwind CSS
+- **Animations:** Framer Motion
+- **Forms:** React Hook Form + Zod validation
+- **State Management:** Zustand or React Context
+- **Icons:** Lucide React
+
+### Backend
+- **Database:** Supabase (PostgreSQL)
+- **ORM:** Drizzle ORM
+- **Authentication:** Supabase Auth
+- **File Storage:** Supabase Storage
+- **Real-time:** Supabase Realtime subscriptions
+
+### Third-Party Services
+- **Payments:** Stripe Connect (for payouts) + Stripe Checkout
+- **Email:** Resend or SendGrid
+- **Analytics:** Plausible or PostHog
+- **Image Optimization:** Next.js Image + Cloudinary (optional)
+
+### Infrastructure
+- **Hosting:** Vercel
+- **CDN:** Vercel Edge Network
+- **Domain:** reachtheapex.net
+
+---
+
+## System Architecture
+
+### Three-Tier Application Structure
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  PUBLIC MARKETING SITE                   │
+│              (reachtheapex.net/{username})              │
+│  - Company Info  - Products  - Testimonials  - Signup   │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ├─ User Signup
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│               DISTRIBUTOR BACK OFFICE                    │
+│            (reachtheapex.net/dashboard)                 │
+│  - Genealogy  - Commissions  - Team Stats  - Profile    │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                CORPORATE ADMIN PANEL                     │
+│           (reachtheapex.net/admin)                      │
+│  - Products  - Comp Plan  - Distributors  - Payouts     │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Database Schema
+
+### Core Tables
+
+#### 1. users (Supabase Auth Extended)
+```sql
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email VARCHAR(255) UNIQUE NOT NULL,
+  username VARCHAR(50) UNIQUE NOT NULL,
+  first_name VARCHAR(100),
+  last_name VARCHAR(100),
+  phone VARCHAR(20),
+  profile_photo_url TEXT,
+  profile_photo_status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+  role ENUM('distributor', 'admin', 'super_admin') DEFAULT 'distributor',
+  status ENUM('active', 'inactive', 'suspended') DEFAULT 'active',
+  sponsor_id UUID REFERENCES users(id),
+  matrix_position INTEGER,
+  enrollment_date TIMESTAMP DEFAULT NOW(),
+  autoship_product_id UUID REFERENCES products(id),
+  stripe_account_id VARCHAR(255), -- For Connect payouts
+  tax_form_status ENUM('pending', 'submitted', 'approved') DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_sponsor ON users(sponsor_id);
+CREATE INDEX idx_users_username ON users(username);
+CREATE INDEX idx_users_email ON users(email);
+```
+
+#### 2. matrix_positions
+```sql
+CREATE TABLE matrix_positions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  parent_id UUID REFERENCES users(id),
+  level INTEGER NOT NULL, -- 1-9
+  position_in_level INTEGER NOT NULL, -- 1-5 (for 5-wide matrix)
+  leg_number INTEGER, -- Which leg under sponsor (1-5)
+  placement_date TIMESTAMP DEFAULT NOW(),
+  is_spillover BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(parent_id, position_in_level, level)
+);
+
+CREATE INDEX idx_matrix_user ON matrix_positions(user_id);
+CREATE INDEX idx_matrix_parent ON matrix_positions(parent_id);
+CREATE INDEX idx_matrix_level ON matrix_positions(level);
+```
+
+#### 3. products
+```sql
+CREATE TABLE products (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  product_type ENUM('digital', 'service', 'physical') DEFAULT 'digital',
+  price DECIMAL(10, 2) NOT NULL,
+  retail_price DECIMAL(10, 2),
+  commission_percentage DECIMAL(5, 2) DEFAULT 0,
+  bv_points INTEGER DEFAULT 0, -- Business Volume points
+  category VARCHAR(100),
+  image_url TEXT,
+  is_autoship_eligible BOOLEAN DEFAULT FALSE,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_products_active ON products(is_active);
+CREATE INDEX idx_products_category ON products(category);
+```
+
+#### 4. orders
+```sql
+CREATE TABLE orders (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  order_number VARCHAR(50) UNIQUE NOT NULL,
+  customer_email VARCHAR(255),
+  customer_name VARCHAR(255),
+  distributor_id UUID REFERENCES users(id),
+  total_amount DECIMAL(10, 2) NOT NULL,
+  total_bv DECIMAL(10, 2) DEFAULT 0,
+  order_type ENUM('retail', 'autoship', 'enrollment') DEFAULT 'retail',
+  payment_status ENUM('pending', 'completed', 'failed', 'refunded') DEFAULT 'pending',
+  stripe_payment_intent_id VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_orders_distributor ON orders(distributor_id);
+CREATE INDEX idx_orders_status ON orders(payment_status);
+CREATE INDEX idx_orders_created ON orders(created_at);
+```
+
+#### 5. order_items
+```sql
+CREATE TABLE order_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+  product_id UUID REFERENCES products(id),
+  quantity INTEGER DEFAULT 1,
+  price DECIMAL(10, 2) NOT NULL,
+  bv_points DECIMAL(10, 2) DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_order_items_order ON order_items(order_id);
+```
+
+#### 6. commissions
+```sql
+CREATE TABLE commissions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id),
+  order_id UUID REFERENCES orders(id),
+  commission_type ENUM('retail', 'matrix', 'rank_bonus', 'matching') NOT NULL,
+  level INTEGER, -- For matrix/matching bonuses
+  amount DECIMAL(10, 2) NOT NULL,
+  percentage DECIMAL(5, 2),
+  status ENUM('pending', 'approved', 'paid') DEFAULT 'pending',
+  paid_date TIMESTAMP,
+  payout_batch_id UUID REFERENCES payout_batches(id),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_commissions_user ON commissions(user_id);
+CREATE INDEX idx_commissions_status ON commissions(status);
+CREATE INDEX idx_commissions_type ON commissions(commission_type);
+```
+
+#### 7. payout_batches
+```sql
+CREATE TABLE payout_batches (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  batch_number VARCHAR(50) UNIQUE NOT NULL,
+  total_amount DECIMAL(12, 2) NOT NULL,
+  distributor_count INTEGER DEFAULT 0,
+  status ENUM('pending', 'processing', 'completed', 'failed') DEFAULT 'pending',
+  stripe_batch_id VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW(),
+  processed_at TIMESTAMP
+);
+
+CREATE INDEX idx_payout_batches_status ON payout_batches(status);
+```
+
+#### 8. rank_achievements
+```sql
+CREATE TABLE rank_achievements (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id),
+  rank_id UUID REFERENCES ranks(id),
+  achieved_date TIMESTAMP DEFAULT NOW(),
+  bonus_amount DECIMAL(10, 2) DEFAULT 0,
+  is_current BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_rank_achievements_user ON rank_achievements(user_id);
+CREATE INDEX idx_rank_achievements_current ON rank_achievements(is_current);
+```
+
+#### 9. ranks
+```sql
+CREATE TABLE ranks (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name VARCHAR(100) NOT NULL,
+  level INTEGER UNIQUE NOT NULL,
+  personal_sales_required DECIMAL(10, 2) DEFAULT 0,
+  team_sales_required DECIMAL(10, 2) DEFAULT 0,
+  active_legs_required INTEGER DEFAULT 0,
+  bonus_amount DECIMAL(10, 2) DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+#### 10. compensation_plan_settings
+```sql
+CREATE TABLE compensation_plan_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  setting_key VARCHAR(100) UNIQUE NOT NULL,
+  setting_value TEXT NOT NULL,
+  data_type ENUM('integer', 'decimal', 'boolean', 'json') DEFAULT 'decimal',
+  description TEXT,
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Default settings
+INSERT INTO compensation_plan_settings (setting_key, setting_value, data_type, description) VALUES
+('matrix_width', '5', 'integer', 'Maximum width of matrix (5x9)'),
+('matrix_depth', '9', 'integer', 'Maximum depth of matrix (5x9)'),
+('retail_commission_pct', '25.00', 'decimal', 'Retail commission percentage'),
+('matching_bonus_levels', '5', 'integer', 'Number of levels for matching bonus'),
+('matching_bonus_pct', '10.00', 'decimal', 'Matching bonus percentage'),
+('autoship_required', 'true', 'boolean', 'Whether autoship is required for commissions');
+```
+
+#### 11. tax_forms
+```sql
+CREATE TABLE tax_forms (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id),
+  form_type ENUM('W9', '1099') DEFAULT 'W9',
+  ssn_ein VARCHAR(50), -- Encrypted
+  legal_name VARCHAR(255),
+  address TEXT,
+  signature_data TEXT,
+  submitted_date TIMESTAMP,
+  status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_tax_forms_user ON tax_forms(user_id);
+```
+
+#### 12. replicated_site_settings
+```sql
+CREATE TABLE replicated_site_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) UNIQUE,
+  custom_headline TEXT,
+  custom_bio TEXT,
+  social_links JSONB, -- {facebook, instagram, linkedin, etc}
+  theme_color VARCHAR(7) DEFAULT '#000000',
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+#### 13. genealogy_stats (Materialized View for Performance)
+```sql
+CREATE MATERIALIZED VIEW genealogy_stats AS
+SELECT 
+  u.id as user_id,
+  COUNT(DISTINCT mp.user_id) as total_downline,
+  COUNT(DISTINCT CASE WHEN mp.level = 1 THEN mp.user_id END) as level_1_count,
+  COUNT(DISTINCT CASE WHEN mp.level = 2 THEN mp.user_id END) as level_2_count,
+  COUNT(DISTINCT CASE WHEN mp.level = 3 THEN mp.user_id END) as level_3_count,
+  SUM(CASE WHEN o.created_at >= NOW() - INTERVAL '30 days' THEN o.total_bv ELSE 0 END) as team_volume_30d
+FROM users u
+LEFT JOIN matrix_positions mp ON mp.parent_id = u.id
+LEFT JOIN orders o ON o.distributor_id = mp.user_id
+GROUP BY u.id;
+
+CREATE INDEX idx_genealogy_stats_user ON genealogy_stats(user_id);
+```
+
+---
+
+## Compensation Plan Logic
+
+### 5x9 Forced Matrix Structure
+
+**Matrix Rules:**
+- Each distributor can have maximum 5 direct positions (width)
+- Matrix extends 9 levels deep
+- Spillover: When a sponsor's level 1 is full (5 people), new recruits spill down to next available position
+- Spillover placement: Left to right, top to bottom (breadth-first)
+
+**Position Calculation Algorithm:**
+```typescript
+function findNextMatrixPosition(sponsorId: string): MatrixPosition {
+  // 1. Check if sponsor has space on level 1 (positions 1-5)
+  const level1Count = await getDirectCount(sponsorId);
+  
+  if (level1Count < 5) {
+    return {
+      parentId: sponsorId,
+      level: 1,
+      position: level1Count + 1,
+      legNumber: level1Count + 1
+    };
+  }
+  
+  // 2. Spillover - find first available position in downline
+  // Breadth-first search through matrix
+  const queue = [sponsorId];
+  
+  while (queue.length > 0) {
+    const currentParent = queue.shift();
+    const children = await getMatrixChildren(currentParent);
+    
+    if (children.length < 5) {
+      const level = await getLevel(currentParent, sponsorId) + 1;
+      return {
+        parentId: currentParent,
+        level: level,
+        position: children.length + 1,
+        legNumber: getLegNumber(currentParent, sponsorId)
+      };
+    }
+    
+    queue.push(...children.map(c => c.userId));
+  }
+}
+```
+
+### Commission Types
+
+#### 1. Retail Commission (25%)
+```typescript
+function calculateRetailCommission(order: Order): Commission {
+  const retailPct = getCompPlanSetting('retail_commission_pct'); // 25%
+  
+  return {
+    userId: order.distributorId,
+    orderId: order.id,
+    commissionType: 'retail',
+    amount: order.totalAmount * (retailPct / 100),
+    percentage: retailPct,
+    status: 'pending'
+  };
+}
+```
+
+#### 2. Matrix Position Bonuses
+```typescript
+// Mock data - levels pay different percentages
+const MATRIX_BONUS_STRUCTURE = {
+  1: 10, // 10% on level 1
+  2: 8,  // 8% on level 2
+  3: 6,  // 6% on level 3
+  4: 4,  // 4% on level 4
+  5: 2,  // 2% on level 5
+  6: 2,  // 2% on level 6
+  7: 1,  // 1% on level 7
+  8: 1,  // 1% on level 8
+  9: 1   // 1% on level 9
+};
+
+function calculateMatrixCommissions(order: Order): Commission[] {
+  const commissions: Commission[] = [];
+  const distributor = await getUser(order.distributorId);
+  
+  // Walk up the matrix 9 levels
+  let currentUser = distributor;
+  let level = 1;
+  
+  while (currentUser.sponsorId && level <= 9) {
+    const upline = await getUser(currentUser.sponsorId);
+    
+    // Only pay if upline has active autoship
+    if (upline.autoshipProductId && upline.status === 'active') {
+      const bonusPct = MATRIX_BONUS_STRUCTURE[level];
+      
+      commissions.push({
+        userId: upline.id,
+        orderId: order.id,
+        commissionType: 'matrix',
+        level: level,
+        amount: order.totalBv * (bonusPct / 100),
+        percentage: bonusPct,
+        status: 'pending'
+      });
+    }
+    
+    currentUser = upline;
+    level++;
+  }
+  
+  return commissions;
+}
+```
+
+#### 3. Rank Achievement Bonuses
+```typescript
+// Mock rank structure
+const RANKS = [
+  { name: 'Associate', level: 1, personalSales: 0, teamSales: 0, bonus: 0 },
+  { name: 'Builder', level: 2, personalSales: 500, teamSales: 2000, bonus: 100 },
+  { name: 'Leader', level: 3, personalSales: 1000, teamSales: 5000, bonus: 250 },
+  { name: 'Director', level: 4, personalSales: 2000, teamSales: 15000, bonus: 500 },
+  { name: 'Executive', level: 5, personalSales: 5000, teamSales: 50000, bonus: 1500 },
+  { name: 'Diamond', level: 6, personalSales: 10000, teamSales: 150000, bonus: 5000 },
+];
+
+function checkRankAdvancement(userId: string): RankAchievement | null {
+  const stats = await getUserStats(userId);
+  const currentRank = await getCurrentRank(userId);
+  
+  for (const rank of RANKS) {
+    if (rank.level > currentRank.level) {
+      if (stats.personalSales30d >= rank.personalSales && 
+          stats.teamSales30d >= rank.teamSales) {
+        
+        return {
+          userId: userId,
+          rankId: rank.id,
+          bonusAmount: rank.bonus,
+          achievedDate: new Date()
+        };
+      }
+    }
+  }
+  
+  return null;
+}
+```
+
+#### 4. Matching Bonuses (10% on 5 levels)
+```typescript
+function calculateMatchingBonuses(commission: Commission): Commission[] {
+  const matchingBonuses: Commission[] = [];
+  const matchingLevels = getCompPlanSetting('matching_bonus_levels'); // 5
+  const matchingPct = getCompPlanSetting('matching_bonus_pct'); // 10%
+  
+  let currentUser = await getUser(commission.userId);
+  let level = 1;
+  
+  while (currentUser.sponsorId && level <= matchingLevels) {
+    const sponsor = await getUser(currentUser.sponsorId);
+    
+    // Only qualified distributors earn matching bonuses
+    if (isQualifiedForMatching(sponsor)) {
+      matchingBonuses.push({
+        userId: sponsor.id,
+        orderId: commission.orderId,
+        commissionType: 'matching',
+        level: level,
+        amount: commission.amount * (matchingPct / 100),
+        percentage: matchingPct,
+        status: 'pending'
+      });
+    }
+    
+    currentUser = sponsor;
+    level++;
+  }
+  
+  return matchingBonuses;
+}
+
+function isQualifiedForMatching(user: User): boolean {
+  // Must have active autoship and be at least rank 3
+  const currentRank = await getCurrentRank(user.id);
+  return user.autoshipProductId !== null && 
+         user.status === 'active' && 
+         currentRank.level >= 3;
+}
+```
+
+---
+
+## Application Features
+
+### PART 1: Public Marketing Site (Replicated)
+
+#### Route Structure
+```
+reachtheapex.net/{username}
+├── / (Home)
+├── /opportunity
+├── /products
+├── /testimonials
+├── /about
+└── /join (Signup)
+```
+
+#### Features
+
+**Homepage**
+- Hero section with call-to-action
+- Distributor name and photo (approved only)
+- Company value propositions
+- Featured products
+- Video introduction
+- Success stories preview
+
+**Opportunity Page**
+- Business opportunity overview
+- Compensation plan highlights (simplified)
+- Income disclosure statement
+- Getting started steps
+- FAQ section
+
+**Products Page**
+- Product catalog with filtering
+- Product details with pricing
+- Add to cart functionality
+- Stripe checkout integration
+- Commission preview for distributors
+
+**Testimonials Page**
+- Video testimonials (corporate controlled)
+- Written testimonials with photos
+- Success story case studies
+- Before/after examples
+
+**About Page**
+- Company history and mission
+- Leadership team
+- Corporate values
+- Contact information
+
+**Join Page (Critical)**
+- Multi-step enrollment form:
+  - Step 1: Personal Information (name, email, phone)
+  - Step 2: Sponsor verification (auto-filled from URL)
+  - Step 3: Autoship selection (AI Business Kit - mock product)
+  - Step 4: Payment setup (Stripe)
+  - Step 5: Tax form (W-9 collection)
+  - Step 6: Welcome & dashboard access
+
+**Technical Implementation:**
+```typescript
+// app/[username]/page.tsx
+export default async function ReplicatedSite({ params }: { params: { username: string } }) {
+  const distributor = await getDistributorByUsername(params.username);
+  
+  if (!distributor || distributor.status !== 'active') {
+    redirect('/');
+  }
+  
+  return <ReplicatedHomePage distributor={distributor} />;
+}
+
+// Dynamic routing for all replicated pages
+// app/[username]/layout.tsx handles common header/footer with distributor branding
+```
+
+**Replicated Site Customization:**
+- Distributor name and photo (approved)
+- Custom headline (optional, max 100 chars)
+- Custom bio (optional, max 500 chars)
+- Social media links
+- All other content corporate-controlled
+
+---
+
+### PART 2: Distributor Back Office
+
+#### Route Structure
+```
+reachtheapex.net/dashboard
+├── / (Overview)
+├── /genealogy
+│   ├── /tree
+│   ├── /list
+│   └── /matrix
+├── /commissions
+├── /team
+├── /replicated-site
+├── /autoship
+├── /profile
+└── /tax-forms
+```
+
+#### Dashboard Overview
+**Key Metrics Cards:**
+- Current rank with progress bar
+- This month's earnings (pending + paid)
+- Team size (total, by level)
+- Personal sales (this month)
+- Team volume (this month)
+- Active autoships in team
+
+**Quick Actions:**
+- Share replicated site link
+- Add team member
+- View latest commissions
+- Update profile photo
+
+**Recent Activity Feed:**
+- New team member enrollments
+- Commission earnings
+- Rank achievements
+- Team milestones
+
+#### Genealogy Views
+
+**1. Tree View (Interactive Visual)**
+```typescript
+// components/genealogy/TreeView.tsx
+import { motion } from 'framer-motion';
+
+interface TreeNode {
+  id: string;
+  name: string;
+  photoUrl: string;
+  level: number;
+  children: TreeNode[];
+  stats: {
+    personalSales: number;
+    teamSize: number;
+    rank: string;
+  };
+}
+
+export function TreeView({ userId }: { userId: string }) {
+  const [treeData, setTreeData] = useState<TreeNode | null>(null);
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  
+  // Features:
+  // - Zoom and pan canvas
+  // - Click to expand/collapse nodes
+  // - Hover for quick stats
+  // - Color coding by rank
+  // - Highlight spillover positions
+  
+  return (
+    <div className="genealogy-tree">
+      <TreeCanvas tree={treeData} onNodeClick={handleNodeClick} />
+    </div>
+  );
+}
+```
+
+**Visual Design:**
+- SVG-based tree with animated connections
+- Profile photos in circular nodes
+- Different colors for each rank level
+- Dotted lines for spillover placements
+- Highlight empty positions
+- Search/filter by name or ID
+
+**2. List View (Tabular)**
+```typescript
+// Table with columns:
+// - Name/Photo
+// - Position (Level X, Position Y)
+// - Enrollment Date
+// - Rank
+// - Personal Sales (30d)
+// - Team Size
+// - Status (Active/Inactive)
+// - Actions (View Details, Message)
+
+// Features:
+// - Sortable columns
+// - Export to CSV
+// - Filter by level, rank, status
+// - Pagination
+```
+
+**3. Matrix View (Grid Layout)**
+```
+Level 1:  [Person] [Person] [Person] [Person] [Person]
+Level 2:  [P] [P] [P] [P] [P]  [P] [P] [P] [P] [P]  ...
+Level 3:  ...
+```
+- Visual 5x9 grid showing all positions
+- Empty slots highlighted
+- Click to see details
+- Spillover indicators
+
+#### Commissions Dashboard
+**Summary Cards:**
+- Total Earnings (Lifetime)
+- This Month
+- Pending Commissions
+- Next Payout Date
+
+**Commissions Table:**
+- Date
+- Type (Retail, Matrix, Rank, Matching)
+- Order/Source
+- Amount
+- Status
+- Actions (View Details)
+
+**Charts:**
+- Monthly earnings trend (Line chart)
+- Commission breakdown by type (Pie chart)
+- Team performance (Bar chart)
+
+**Filters:**
+- Date range
+- Commission type
+- Status
+
+#### Team Page
+- Team members list with stats
+- Team performance metrics
+- Top performers leaderboard
+- Team growth chart
+- Downloadable team reports
+
+#### Replicated Site Manager
+- Preview current site
+- Edit profile photo (requires approval)
+- Edit custom headline
+- Edit custom bio
+- Add/edit social links
+- Copy share link
+- QR code generator
+- Site analytics (views, signups, sales)
+
+#### Autoship Management
+- Current autoship product
+- Next ship date
+- Update/cancel autoship
+- Order history
+- Autoship benefits explanation
+
+#### Profile & Settings
+- Personal information
+- Contact details
+- Payment methods (Stripe Connect)
+- Email preferences
+- Password change
+- Two-factor authentication
+
+#### Tax Forms
+- W-9 form submission
+- 1099 history
+- Download tax documents
+- Update tax information
+
+---
+
+### PART 3: Corporate Admin Panel
+
+#### Route Structure
+```
+reachtheapex.net/admin
+├── / (Dashboard)
+├── /distributors
+│   ├── /list
+│   ├── /pending-photos
+│   └── /tax-forms
+├── /products
+│   ├── /list
+│   └── /create
+├── /compensation
+│   ├── /settings
+│   ├── /ranks
+│   └── /rules
+├── /orders
+├── /commissions
+│   ├── /pending
+│   └── /payouts
+├── /content
+│   ├── /testimonials
+│   ├── /videos
+│   └── /pages
+├── /reports
+└── /settings
+```
+
+#### Admin Dashboard
+**Key Metrics:**
+- Total Active Distributors
+- Total Revenue (This Month)
+- Pending Commissions
+- Pending Photo Approvals
+- Average Team Size
+- Top Earners
+- Growth Rate
+
+**Charts:**
+- Distributor growth over time
+- Revenue trends
+- Rank distribution
+- Product sales breakdown
+
+#### Distributor Management
+
+**Distributor List:**
+- Search/filter by name, email, rank, status
+- Bulk actions (suspend, activate, email)
+- Export to CSV
+- View full genealogy
+- Impersonate user (for support)
+
+**Actions on Distributor:**
+- View profile
+- Edit details
+- View commissions
+- View genealogy
+- Adjust rank manually
+- Send email
+- Suspend/activate account
+- View login history
+
+**Pending Photo Approvals:**
+- Queue of submitted photos
+- Approve/reject with reason
+- Side-by-side before/after
+- Batch approve
+
+**Tax Form Management:**
+- List of all tax forms
+- Status tracking
+- Download individual forms
+- Bulk export for accounting
+- Mark as approved/rejected
+
+#### Product Management
+
+**Product List:**
+- All products with status
+- Edit/delete products
+- Create new product
+- Toggle active status
+- Bulk import via CSV
+
+**Create/Edit Product Form:**
+- Name
+- Description (rich text editor)
+- Product type (digital/service/physical)
+- Price
+- Retail price
+- Commission percentage
+- BV points
+- Category
+- Image upload
+- Autoship eligible?
+- Active status
+
+#### Compensation Plan Management
+
+**Settings Page:**
+- Matrix width (5)
+- Matrix depth (9)
+- Retail commission %
+- Matrix bonus structure (by level)
+- Matching bonus levels
+- Matching bonus %
+- Autoship requirement
+- Minimum payout threshold
+
+**Ranks Configuration:**
+- List of all ranks
+- Create/edit ranks
+- Set qualifications (personal sales, team sales, active legs)
+- Set bonus amounts
+- Rank advancement rules
+
+**Compensation Rules:**
+- Custom rules engine (future)
+- Override defaults
+- Special promotions
+- Seasonal bonuses
+
+#### Orders Management
+- All orders list
+- Filter by date, status, distributor
+- View order details
+- Refund orders
+- Mark as shipped (if physical)
+- Export to CSV
+
+#### Commissions & Payouts
+
+**Pending Commissions:**
+- All commissions awaiting approval
+- Batch approve
+- Individual review
+- Hold for review
+- Reject with reason
+
+**Payout Management:**
+- Create payout batch
+- Select date range
+- Review total amounts
+- Process via Stripe Connect
+- Payout history
+- Failed payout retries
+
+**Payout Process:**
+1. Select period (e.g., "November 1-15, 2025")
+2. System calculates all approved commissions
+3. Admin reviews totals
+4. Confirm payout
+5. Stripe Connect transfers to distributors
+6. Email notifications sent
+7. Commissions marked as "paid"
+
+#### Content Management
+
+**Testimonials:**
+- Add/edit/delete testimonials
+- Upload videos
+- Approve user-submitted content
+- Feature on homepage
+
+**Videos:**
+- Training videos
+- Product demos
+- Opportunity videos
+- Organize by category
+
+**Page Content:**
+- Edit homepage content
+- Edit opportunity page
+- Edit about page
+- Edit FAQ
+- Rich text editor with media library
+
+#### Reports
+
+**Pre-built Reports:**
+- Distributor growth report
+- Revenue report
+- Commission report by type
+- Rank advancement report
+- Product sales report
+- Geographic distribution
+- Retention analysis
+
+**Custom Report Builder:**
+- Select metrics
+- Choose date range
+- Apply filters
+- Export to CSV/PDF
+- Schedule automated reports
+
+#### System Settings
+- Company information
+- Email templates
+- Notification settings
+- API keys (Stripe, email provider)
+- Security settings
+- Audit logs
+
+---
+
+## User Flows
+
+### Flow 1: New Distributor Signup
+
+```
+User visits reachtheapex.net/johndoe
+↓
+Clicks "Join Our Team"
+↓
+Step 1: Personal Info Form
+- First Name, Last Name, Email, Phone
+- Username (check availability)
+- Password
+↓
+Step 2: Sponsor Verification
+- Shows: "Your Sponsor: John Doe"
+- Confirms sponsor ID
+↓
+Step 3: Autoship Selection
+- Displays AI Business Kit ($49/month)
+- Explains autoship requirement
+- Add to cart
+↓
+Step 4: Payment
+- Stripe Checkout
+- Collect payment method
+↓
+Step 5: Tax Form
+- W-9 digital signature
+- SSN collection (encrypted)
+↓
+Step 6: Welcome!
+- Success message
+- "Your replicated site: reachtheapex.net/newusername"
+- Access dashboard button
+↓
+Matrix Position Calculation (Background)
+- Find sponsor's next available position
+- Create matrix_positions record
+- Send welcome email with credentials
+- Trigger commission calculation for upline
+↓
+Dashboard Redirect
+```
+
+### Flow 2: Product Purchase on Replicated Site
+
+```
+Customer visits reachtheapex.net/johndoe/products
+↓
+Browses product catalog
+↓
+Adds product to cart
+↓
+Checkout
+- Enter shipping info (if physical)
+- Enter email for receipt
+- Stripe payment
+↓
+Order Created
+- Order record created with distributor_id
+↓
+Commission Calculation Triggered
+- Calculate retail commission (25%)
+- Calculate matrix bonuses (9 levels up)
+- Calculate matching bonuses (5 levels of sponsors)
+- All commissions set to "pending"
+↓
+Thank You Page
+- Order confirmation
+- Email sent with details
+↓
+Distributor Notification
+- Email: "You earned a commission!"
+- Dashboard shows new pending commission
+```
+
+### Flow 3: Monthly Payout Process
+
+```
+Admin Dashboard → Commissions → Create Payout
+↓
+Select Date Range
+- Example: "November 1-30, 2025"
+↓
+System Calculates
+- Sum all "approved" commissions in range
+- Group by distributor
+- Check minimum payout threshold ($50)
+↓
+Review Screen
+- Total amount: $125,000
+- Distributor count: 487
+- List of all payouts
+↓
+Admin Confirms
+↓
+Stripe Connect Batch Transfer
+- Loop through each distributor
+- Create transfer to their Stripe account
+- Record stripe_batch_id
+↓
+Update Records
+- Mark commissions as "paid"
+- Create payout_batch record
+- Update paid_date
+↓
+Send Notifications
+- Email each distributor with payout details
+- Include earnings breakdown
+↓
+Complete
+```
+
+### Flow 4: Genealogy Matrix Spillover
+
+```
+Distributor A has 5 direct signups (level 1 full)
+↓
+New person (Person F) signs up under Distributor A
+↓
+System checks Distributor A's level 1
+- Positions 1-5 occupied
+↓
+Spillover Logic Triggered
+- Search downline breadth-first
+- Find first person with < 5 on level 1
+- Example: Person B (position 1 under A) has only 3 direct
+↓
+Place Person F under Person B
+- parent_id = Person B
+- level = 2 (relative to Distributor A)
+- leg_number = 1 (still in Distributor A's leg 1)
+- is_spillover = true
+↓
+Notifications
+- Distributor A: "Spillover placement occurred"
+- Person B: "New team member placed under you!"
+- Person F: "Welcome! Placed in position X"
+```
+
+---
+
+## API Endpoints
+
+### Public API (for replicated sites)
+
+```typescript
+// GET /api/public/distributor/[username]
+// Returns distributor info for replicated site
+
+// GET /api/public/products
+// Returns active product catalog
+
+// POST /api/public/orders
+// Creates new order with Stripe checkout
+
+// POST /api/public/signup
+// Creates new distributor account
+```
+
+### Distributor API (authenticated)
+
+```typescript
+// GET /api/distributor/dashboard
+// Returns dashboard metrics
+
+// GET /api/distributor/genealogy/tree
+// Returns tree structure
+
+// GET /api/distributor/genealogy/list?level=1&page=1
+// Returns paginated list view
+
+// GET /api/distributor/commissions?start_date=X&end_date=Y
+// Returns commissions with filters
+
+// PUT /api/distributor/profile
+// Updates profile information
+
+// POST /api/distributor/profile/photo
+// Uploads new profile photo
+
+// GET /api/distributor/replicated-site
+// Returns replicated site settings
+
+// PUT /api/distributor/replicated-site
+// Updates replicated site settings
+
+// GET /api/distributor/team/stats
+// Returns team statistics
+```
+
+### Admin API (admin only)
+
+```typescript
+// GET /api/admin/distributors?page=1&search=X
+// Returns distributor list
+
+// PUT /api/admin/distributors/[id]
+// Updates distributor details
+
+// POST /api/admin/distributors/[id]/suspend
+// Suspends distributor
+
+// GET /api/admin/photos/pending
+// Returns pending photo approvals
+
+// POST /api/admin/photos/[id]/approve
+// Approves photo
+
+// POST /api/admin/photos/[id]/reject
+// Rejects photo
+
+// GET /api/admin/products
+// Returns all products
+
+// POST /api/admin/products
+// Creates new product
+
+// PUT /api/admin/products/[id]
+// Updates product
+
+// DELETE /api/admin/products/[id]
+// Deletes product
+
+// GET /api/admin/compensation/settings
+// Returns comp plan settings
+
+// PUT /api/admin/compensation/settings
+// Updates comp plan settings
+
+// POST /api/admin/payouts/create
+// Creates new payout batch
+
+// POST /api/admin/payouts/[id]/process
+// Processes payout via Stripe
+
+// GET /api/admin/reports/[type]
+// Generates report
+```
+
+---
+
+## UI/UX Design Guidelines
+
+### Design System
+
+**Color Palette (Mock - to be replaced with brand colors):**
+```css
+--primary: #1a56db (Blue)
+--secondary: #7c3aed (Purple)
+--accent: #f59e0b (Gold)
+--success: #10b981 (Green)
+--danger: #ef4444 (Red)
+--warning: #f59e0b (Orange)
+--gray-50: #f9fafb
+--gray-900: #111827
+```
+
+**Typography:**
+- Headings: Inter (Bold)
+- Body: Inter (Regular)
+- Monospace: JetBrains Mono (for IDs, codes)
+
+**Component Library:**
+- Buttons: Primary, Secondary, Outline, Ghost
+- Cards: Elevated, Outlined, Flat
+- Forms: Text inputs, Selects, Checkboxes, Radio buttons
+- Tables: Sortable headers, Pagination, Row actions
+- Modals: Confirmation, Forms, Info
+- Toasts: Success, Error, Warning, Info
+- Loading States: Skeletons, Spinners, Progress bars
+
+### Animation Standards (Framer Motion)
+
+```typescript
+// Page transitions
+const pageVariants = {
+  initial: { opacity: 0, y: 20 },
+  animate: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: -20 }
+};
+
+// Card hover
+const cardHover = {
+  scale: 1.02,
+  boxShadow: "0 20px 25px -5px rgb(0 0 0 / 0.1)"
+};
+
+// List item entrance
+const listItemVariants = {
+  hidden: { opacity: 0, x: -20 },
+  visible: (i: number) => ({
+    opacity: 1,
+    x: 0,
+    transition: { delay: i * 0.1 }
+  })
+};
+
+// Stats counter
+const counterAnimation = {
+  initial: { scale: 0.5, opacity: 0 },
+  animate: { scale: 1, opacity: 1 }
+};
+```
+
+**Animation Principles:**
+- Keep transitions under 300ms for snappy feel
+- Use spring animations for interactive elements
+- Stagger list animations
+- Animate metric changes (numbers count up)
+- Page transitions should be smooth
+- Loading states should be engaging
+
+### Responsive Design
+
+**Breakpoints:**
+```typescript
+const breakpoints = {
+  sm: '640px',
+  md: '768px',
+  lg: '1024px',
+  xl: '1280px',
+  '2xl': '1536px'
+};
+```
+
+**Mobile-First Approach:**
+- All pages must work on mobile
+- Genealogy tree switches to list on mobile
+- Dashboard stacks metrics vertically
+- Tables become cards on mobile
+- Side navigation becomes hamburger menu
+
+---
+
+## Security & Compliance
+
+### Authentication & Authorization
+
+**Supabase Auth Implementation:**
+```typescript
+// Row Level Security (RLS) Policies
+
+// Users can only see their own data
+CREATE POLICY "Users can view own record" ON users
+  FOR SELECT USING (auth.uid() = id);
+
+// Distributors can see their downline
+CREATE POLICY "Distributors can view downline" ON users
+  FOR SELECT USING (
+    id IN (
+      SELECT user_id FROM matrix_positions 
+      WHERE parent_id = auth.uid()
+    )
+  );
+
+// Only admins can update products
+CREATE POLICY "Admins can manage products" ON products
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM users 
+      WHERE id = auth.uid() 
+      AND role IN ('admin', 'super_admin')
+    )
+  );
+
+// Users can only see their own commissions
+CREATE POLICY "Users view own commissions" ON commissions
+  FOR SELECT USING (user_id = auth.uid());
+```
+
+**Role-Based Access Control:**
+- `distributor`: Default role, access to back office
+- `admin`: Access to admin panel, cannot modify comp plan
+- `super_admin`: Full access including comp plan settings
+
+### Data Protection
+
+**Sensitive Data Handling:**
+- SSN/Tax ID encrypted at rest using Supabase Vault
+- Credit card data never stored (Stripe handles)
+- Password hashing via Supabase Auth (bcrypt)
+- Two-factor authentication option
+- Session management with JWT tokens
+
+**PII Protection:**
+```typescript
+// Encrypt SSN before storage
+import { createClient } from '@supabase/supabase-js';
+
+async function storeTaxForm(userId: string, ssn: string) {
+  const supabase = createClient(url, key);
+  
+  // Use Supabase Vault to encrypt
+  const { data: encryptedSSN } = await supabase.rpc('vault_encrypt', {
+    secret: ssn
+  });
+  
+  await supabase.from('tax_forms').insert({
+    user_id: userId,
+    ssn_ein: encryptedSSN,
+    // ... other fields
+  });
+}
+```
+
+### Compliance
+
+**MLM-Specific Compliance:**
+- Income disclosure statement on opportunity page
+- Clear refund policy (required in most states)
+- Product purchase not required to earn commissions
+- No inventory loading
+- Retail sales tracking
+- Anti-pyramid scheme compliance
+
+**Legal Pages (Required):**
+- Terms of Service
+- Privacy Policy
+- Compensation Plan Disclosure
+- Income Disclosure Statement
+- Refund Policy
+- Distributor Agreement
+
+**Audit Trail:**
+```sql
+CREATE TABLE audit_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id),
+  action VARCHAR(100) NOT NULL,
+  resource_type VARCHAR(50),
+  resource_id UUID,
+  changes JSONB,
+  ip_address INET,
+  user_agent TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Log all sensitive actions
+-- - Commission adjustments
+-- - Rank changes
+-- - Payout processing
+-- - Photo approvals
+-- - Account suspensions
+```
+
+---
+
+## Performance Optimization
+
+### Database Optimization
+
+**Indexes (already in schema):**
+- All foreign keys indexed
+- Frequently queried columns indexed
+- Composite indexes for common queries
+
+**Query Optimization:**
+```typescript
+// Bad: N+1 query problem
+const users = await getUsers();
+for (const user of users) {
+  const stats = await getUserStats(user.id); // N queries!
+}
+
+// Good: Use join or materialized view
+const usersWithStats = await supabase
+  .from('users')
+  .select('*, genealogy_stats(*)');
+```
+
+**Caching Strategy:**
+```typescript
+// Redis cache for frequently accessed data
+import { createClient } from 'redis';
+
+const cache = createClient();
+
+// Cache product catalog (5 min TTL)
+async function getProducts() {
+  const cached = await cache.get('products');
+  if (cached) return JSON.parse(cached);
+  
+  const products = await supabase.from('products').select('*');
+  await cache.setEx('products', 300, JSON.stringify(products));
+  
+  return products;
+}
+
+// Cache genealogy tree (1 min TTL)
+// Cache user stats (30 sec TTL)
+```
+
+**Database Connection Pooling:**
+- Supabase handles pooling automatically
+- Use connection limits in Drizzle config
+
+### Frontend Optimization
+
+**Next.js Optimizations:**
+```typescript
+// Static generation for public pages
+export const revalidate = 3600; // Revalidate every hour
+
+// Dynamic imports for heavy components
+const GenealogyTree = dynamic(() => import('@/components/GenealogyTree'), {
+  loading: () => <GenealogyTreeSkeleton />,
+  ssr: false // Client-side only for complex SVG
+});
+
+// Image optimization
+import Image from 'next/image';
+<Image 
+  src={distributor.photoUrl} 
+  alt={distributor.name}
+  width={200}
+  height={200}
+  priority={false}
+  loading="lazy"
+/>
+```
+
+**Code Splitting:**
+- Lazy load admin panel components
+- Separate bundle for genealogy visualizations
+- Separate bundle for chart libraries
+
+**Asset Optimization:**
+- Compress images (WebP format)
+- Minify CSS/JS
+- Use CDN for static assets
+- Enable gzip/brotli compression
+
+---
+
+## Third-Party Integrations
+
+### Stripe Integration
+
+**Stripe Connect for Payouts:**
+```typescript
+// 1. Create Stripe Connect account for distributor
+async function createStripeAccount(userId: string, email: string) {
+  const account = await stripe.accounts.create({
+    type: 'express',
+    country: 'US',
+    email: email,
+    capabilities: {
+      transfers: { requested: true }
+    }
+  });
+  
+  await updateUser(userId, { stripe_account_id: account.id });
+  
+  return account;
+}
+
+// 2. Create account link for onboarding
+async function createAccountLink(accountId: string) {
+  const accountLink = await stripe.accountLinks.create({
+    account: accountId,
+    refresh_url: 'https://reachtheapex.net/dashboard/connect/refresh',
+    return_url: 'https://reachtheapex.net/dashboard/connect/return',
+    type: 'account_onboarding'
+  });
+  
+  return accountLink.url;
+}
+
+// 3. Process payout
+async function processPayout(payoutBatch: PayoutBatch) {
+  const payouts = await getPayoutsByBatch(payoutBatch.id);
+  
+  for (const payout of payouts) {
+    try {
+      const transfer = await stripe.transfers.create({
+        amount: Math.round(payout.amount * 100), // Convert to cents
+        currency: 'usd',
+        destination: payout.stripeAccountId,
+        description: `Commission Payout - ${payoutBatch.batchNumber}`
+      });
+      
+      await updateCommission(payout.commissionId, {
+        status: 'paid',
+        paid_date: new Date()
+      });
+    } catch (error) {
+      await logPayoutError(payout.id, error);
+    }
+  }
+}
+```
+
+**Stripe Checkout for Orders:**
+```typescript
+async function createCheckoutSession(order: Order) {
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    line_items: order.items.map(item => ({
+      price_data: {
+        currency: 'usd',
+        product_data: {
+          name: item.productName,
+          images: [item.productImage]
+        },
+        unit_amount: Math.round(item.price * 100)
+      },
+      quantity: item.quantity
+    })),
+    mode: 'payment',
+    success_url: `https://reachtheapex.net/order/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `https://reachtheapex.net/order/cancel`,
+    metadata: {
+      order_id: order.id,
+      distributor_id: order.distributorId
+    }
+  });
+  
+  return session.url;
+}
+```
+
+### Email Service (Resend/SendGrid)
+
+**Transactional Emails:**
+- Welcome email (new distributor)
+- Order confirmation
+- Commission notification
+- Payout notification
+- Password reset
+- Photo approval/rejection
+- Rank advancement
+- Team member signup notification
+
+**Email Templates:**
+```typescript
+// templates/welcome.tsx
+export const WelcomeEmail = ({ name, username, replicatedUrl }: Props) => (
+  <Html>
+    <Head />
+    <Body>
+      <Container>
+        <Heading>Welcome to Apex Affinity Group, {name}!</Heading>
+        <Text>
+          Congratulations on joining our team! Your replicated website is ready:
+        </Text>
+        <Button href={replicatedUrl}>
+          Visit Your Site
+        </Button>
+        <Text>
+          Login to your dashboard to get started:
+        </Text>
+        <Button href="https://reachtheapex.net/dashboard">
+          Access Dashboard
+        </Button>
+      </Container>
+    </Body>
+  </Html>
+);
+
+// Send email
+import { Resend } from 'resend';
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+await resend.emails.send({
+  from: 'Apex Affinity Group <noreply@reachtheapex.net>',
+  to: user.email,
+  subject: 'Welcome to Apex Affinity Group!',
+  react: WelcomeEmail({ 
+    name: user.firstName, 
+    username: user.username,
+    replicatedUrl: `https://reachtheapex.net/${user.username}`
+  })
+});
+```
+
+---
+
+## Mock Data Generation
+
+### Seed Data Script
+
+```typescript
+// scripts/seed-database.ts
+
+import { faker } from '@faker-js/faker';
+
+async function seedDatabase() {
+  console.log('🌱 Seeding database...');
+  
+  // 1. Create ranks
+  const ranks = await createRanks();
+  
+  // 2. Create products
+  const products = await createProducts();
+  
+  // 3. Create distributors (500)
+  const distributors = await createDistributors(500);
+  
+  // 4. Create orders (2000)
+  const orders = await createOrders(2000, distributors, products);
+  
+  // 5. Calculate commissions
+  await calculateAllCommissions(orders);
+  
+  // 6. Create testimonials
+  await createTestimonials(20);
+  
+  console.log('✅ Database seeded successfully!');
+}
+
+async function createRanks() {
+  const ranks = [
+    { name: 'Associate', level: 1, personalSales: 0, teamSales: 0, bonus: 0 },
+    { name: 'Builder', level: 2, personalSales: 500, teamSales: 2000, bonus: 100 },
+    { name: 'Leader', level: 3, personalSales: 1000, teamSales: 5000, bonus: 250 },
+    { name: 'Director', level: 4, personalSales: 2000, teamSales: 15000, bonus: 500 },
+    { name: 'Executive', level: 5, personalSales: 5000, teamSales: 50000, bonus: 1500 },
+    { name: 'Diamond', level: 6, personalSales: 10000, teamSales: 150000, bonus: 5000 },
+  ];
+  
+  return await Promise.all(
+    ranks.map(rank => supabase.from('ranks').insert(rank))
+  );
+}
+
+async function createProducts() {
+  const products = [
+    {
+      name: 'AI Business Kit (Monthly)',
+      description: 'Complete AI-powered business automation toolkit',
+      productType: 'service',
+      price: 49.00,
+      retailPrice: 97.00,
+      commissionPercentage: 25,
+      bvPoints: 50,
+      category: 'Software',
+      isAutoshipEligible: true
+    },
+    {
+      name: 'AI Marketing Suite',
+      description: 'Advanced AI marketing automation tools',
+      productType: 'service',
+      price: 99.00,
+      retailPrice: 197.00,
+      commissionPercentage: 25,
+      bvPoints: 100,
+      category: 'Software'
+    },
+    {
+      name: 'Business Accelerator Course',
+      description: 'Complete business growth training program',
+      productType: 'digital',
+      price: 297.00,
+      retailPrice: 497.00,
+      commissionPercentage: 30,
+      bvPoints: 300,
+      category: 'Training'
+    },
+    // ... 7 more products
+  ];
+  
+  return await Promise.all(
+    products.map(product => supabase.from('products').insert(product))
+  );
+}
+
+async function createDistributors(count: number) {
+  const distributors = [];
+  
+  // Create first distributor (corporate account)
+  const corporate = await createDistributor({
+    firstName: 'Apex',
+    lastName: 'Corporate',
+    email: 'corporate@reachtheapex.net',
+    username: 'corporate',
+    role: 'super_admin',
+    sponsorId: null
+  });
+  
+  distributors.push(corporate);
+  
+  // Create remaining distributors with genealogy
+  for (let i = 1; i < count; i++) {
+    const sponsor = distributors[Math.floor(Math.random() * distributors.length)];
+    
+    const distributor = await createDistributor({
+      firstName: faker.person.firstName(),
+      lastName: faker.person.lastName(),
+      email: faker.internet.email(),
+      username: faker.internet.userName().toLowerCase(),
+      sponsorId: sponsor.id
+    });
+    
+    // Calculate matrix position
+    const position = await findNextMatrixPosition(sponsor.id);
+    await createMatrixPosition(distributor.id, position);
+    
+    // 60% chance of having autoship
+    if (Math.random() > 0.4) {
+      await updateDistributor(distributor.id, {
+        autoshipProductId: products[0].id // AI Business Kit
+      });
+    }
+    
+    distributors.push(distributor);
+  }
+  
+  return distributors;
+}
+
+async function createOrders(count: number, distributors: User[], products: Product[]) {
+  const orders = [];
+  
+  for (let i = 0; i < count; i++) {
+    const distributor = distributors[Math.floor(Math.random() * distributors.length)];
+    const product = products[Math.floor(Math.random() * products.length)];
+    const quantity = Math.floor(Math.random() * 3) + 1;
+    
+    const order = await createOrder({
+      distributorId: distributor.id,
+      customerEmail: faker.internet.email(),
+      customerName: faker.person.fullName(),
+      orderType: Math.random() > 0.7 ? 'autoship' : 'retail',
+      paymentStatus: 'completed',
+      createdAt: faker.date.between({ 
+        from: '2025-01-01', 
+        to: '2025-11-21' 
+      })
+    });
+    
+    await createOrderItem({
+      orderId: order.id,
+      productId: product.id,
+      quantity: quantity,
+      price: product.price,
+      bvPoints: product.bvPoints
+    });
+    
+    orders.push(order);
+  }
+  
+  return orders;
+}
+```
+
+### Realistic Data Patterns
+
+**Genealogy Distribution:**
+- 30% of distributors have no direct recruits
+- 50% have 1-2 direct recruits
+- 15% have 3-4 direct recruits
+- 5% have 5 direct recruits (full level 1)
+
+**Sales Distribution:**
+- 40% of distributors have 0 sales this month
+- 30% have 1-3 sales
+- 20% have 4-10 sales
+- 10% have 11+ sales (top performers)
+
+**Rank Distribution:**
+- 60% Associate (rank 1)
+- 25% Builder (rank 2)
+- 10% Leader (rank 3)
+- 4% Director (rank 4)
+- 0.8% Executive (rank 5)
+- 0.2% Diamond (rank 6)
+
+---
+
+## Testing Strategy
+
+### Unit Tests (Vitest)
+
+**Critical Functions to Test:**
+```typescript
+// __tests__/matrix-position.test.ts
+describe('findNextMatrixPosition', () => {
+  it('should place first recruit in position 1', async () => {
+    const sponsor = await createTestUser();
+    const position = await findNextMatrixPosition(sponsor.id);
+    
+    expect(position.level).toBe(1);
+    expect(position.position).toBe(1);
+    expect(position.parentId).toBe(sponsor.id);
+  });
+  
+  it('should spillover when level 1 is full', async () => {
+    const sponsor = await createTestUser();
+    await fillLevel1(sponsor.id); // Create 5 direct recruits
+    
+    const position = await findNextMatrixPosition(sponsor.id);
+    
+    expect(position.level).toBe(2);
+    expect(position.isSpillover).toBe(true);
+  });
+});
+
+// __tests__/commissions.test.ts
+describe('calculateCommissions', () => {
+  it('should calculate retail commission correctly', async () => {
+    const order = await createTestOrder({ totalAmount: 100 });
+    const commission = await calculateRetailCommission(order);
+    
+    expect(commission.amount).toBe(25); // 25%
+    expect(commission.commissionType).toBe('retail');
+  });
+  
+  it('should calculate matrix commissions up 9 levels', async () => {
+    const genealogy = await createTestGenealogy(9);
+    const order = await createTestOrder({ 
+      distributorId: genealogy.bottom.id,
+      totalBv: 100
+    });
+    
+    const commissions = await calculateMatrixCommissions(order);
+    
+    expect(commissions).toHaveLength(9);
+    expect(commissions[0].level).toBe(1);
+    expect(commissions[8].level).toBe(9);
+  });
+  
+  it('should not pay inactive distributors', async () => {
+    const sponsor = await createTestUser({ status: 'inactive' });
+    const distributor = await createTestUser({ sponsorId: sponsor.id });
+    const order = await createTestOrder({ distributorId: distributor.id });
+    
+    const commissions = await calculateMatrixCommissions(order);
+    const sponsorCommission = commissions.find(c => c.userId === sponsor.id);
+    
+    expect(sponsorCommission).toBeUndefined();
+  });
+});
+```
+
+### Integration Tests
+
+**API Endpoint Tests:**
+```typescript
+// __tests__/api/signup.test.ts
+describe('POST /api/public/signup', () => {
+  it('should create new distributor with valid data', async () => {
+    const sponsor = await createTestUser();
+    
+    const response = await fetch('/api/public/signup', {
+      method: 'POST',
+      body: JSON.stringify({
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john@example.com',
+        username: 'johndoe',
+        password: 'SecurePass123!',
+        sponsorId: sponsor.id
+      })
+    });
+    
+    expect(response.status).toBe(201);
+    const data = await response.json();
+    expect(data.user.username).toBe('johndoe');
+    expect(data.replicatedUrl).toBe('https://reachtheapex.net/johndoe');
+  });
+  
+  it('should reject duplicate username', async () => {
+    await createTestUser({ username: 'johndoe' });
+    
+    const response = await fetch('/api/public/signup', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: 'johndoe',
+        // ... other fields
+      })
+    });
+    
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: 'Username already taken'
+    });
+  });
+});
+```
+
+### End-to-End Tests (Playwright)
+
+**Critical User Flows:**
+```typescript
+// e2e/signup-flow.spec.ts
+test('complete distributor signup flow', async ({ page }) => {
+  await page.goto('https://reachtheapex.net/demo');
+  
+  // Click join button
+  await page.click('text=Join Our Team');
+  
+  // Fill step 1
+  await page.fill('[name="firstName"]', 'Test');
+  await page.fill('[name="lastName"]', 'User');
+  await page.fill('[name="email"]', 'test@example.com');
+  await page.fill('[name="username"]', 'testuser123');
+  await page.fill('[name="password"]', 'SecurePass123!');
+  await page.click('text=Next');
+  
+  // Verify step 2 shows sponsor
+  await expect(page.locator('text=Your Sponsor: Demo')).toBeVisible();
+  await page.click('text=Next');
+  
+  // Select autoship
+  await page.click('[data-product="ai-business-kit"]');
+  await page.click('text=Next');
+  
+  // Complete Stripe checkout (test mode)
+  await page.fill('[name="cardNumber"]', '4242424242424242');
+  await page.fill('[name="expiry"]', '12/25');
+  await page.fill('[name="cvc"]', '123');
+  await page.click('text=Subscribe');
+  
+  // Fill W-9
+  await page.fill('[name="ssn"]', '123-45-6789');
+  await page.click('[name="signature"]');
+  await page.click('text=Submit');
+  
+  // Verify success
+  await expect(page.locator('text=Welcome to Apex Affinity Group!')).toBeVisible();
+  await expect(page.locator('text=reachtheapex.net/testuser123')).toBeVisible();
+});
+```
+
+---
+
+## Deployment & DevOps
+
+### Environment Variables
+
+```bash
+# .env.local (Development)
+NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx
+SUPABASE_SERVICE_ROLE_KEY=xxx
+
+STRIPE_PUBLISHABLE_KEY=pk_test_xxx
+STRIPE_SECRET_KEY=sk_test_xxx
+STRIPE_WEBHOOK_SECRET=whsec_xxx
+
+RESEND_API_KEY=re_xxx
+
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+```bash
+# .env.production (Production)
+NEXT_PUBLIC_SUPABASE_URL=https://production.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx
+SUPABASE_SERVICE_ROLE_KEY=xxx
+
+STRIPE_PUBLISHABLE_KEY=pk_live_xxx
+STRIPE_SECRET_KEY=sk_live_xxx
+STRIPE_WEBHOOK_SECRET=whsec_xxx
+
+RESEND_API_KEY=re_xxx
+
+NEXT_PUBLIC_APP_URL=https://reachtheapex.net
+```
+
+### Deployment Pipeline
+
+**Vercel Deployment:**
+1. Connect GitHub repository
+2. Set environment variables in Vercel dashboard
+3. Configure build settings:
+   - Build Command: `npm run build`
+   - Output Directory: `.next`
+   - Install Command: `npm install`
+4. Set up domain: reachtheapex.net
+5. Enable automatic deployments on push to `main`
+
+**Database Migrations:**
+```bash
+# Run migrations before deployment
+npm run db:migrate
+
+# Drizzle migration script
+drizzle-kit generate:pg
+drizzle-kit push:pg
+```
+
+**Pre-Deployment Checklist:**
+- [ ] Run all tests (`npm test`)
+- [ ] Database migrations applied
+- [ ] Environment variables set in Vercel
+- [ ] Stripe webhooks configured
+- [ ] Email templates tested
+- [ ] Legal pages reviewed
+- [ ] Admin accounts created
+- [ ] Seed data loaded (if fresh database)
+
+### Monitoring & Logging
+
+**Error Tracking (Sentry):**
+```typescript
+// sentry.config.ts
+import * as Sentry from '@sentry/nextjs';
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  tracesSampleRate: 0.1,
+  beforeSend(event) {
+    // Strip sensitive data
+    if (event.request?.data) {
+      delete event.request.data.password;
+      delete event.request.data.ssn;
+    }
+    return event;
+  }
+});
+```
+
+**Application Logs:**
+- Use structured logging (Pino or Winston)
+- Log levels: error, warn, info, debug
+- Include context: userId, orderId, etc.
+- Ship logs to external service (Datadog, LogRocket)
+
+**Performance Monitoring:**
+- Next.js Analytics (Vercel)
+- Core Web Vitals tracking
+- Database query performance
+- API response times
+- Stripe webhook processing times
+
+---
+
+## Development Phases
+
+### Phase 1: MVP Foundation (Weeks 1-3)
+**Goal:** Core infrastructure and basic functionality
+
+**Week 1:**
+- [ ] Project setup (Next.js, Supabase, Drizzle)
+- [ ] Database schema implementation
+- [ ] Authentication setup
+- [ ] Basic UI components library
+
+**Week 2:**
+- [ ] Public marketing site template
+- [ ] Replicated site routing (`/[username]`)
+- [ ] Product catalog display
+- [ ] Signup flow (steps 1-3)
+
+**Week 3:**
+- [ ] Stripe integration (checkout + Connect)
+- [ ] Order processing
+- [ ] Distributor dashboard skeleton
+- [ ] Basic genealogy list view
+
+### Phase 2: Core MLM Features (Weeks 4-6)
+**Goal:** Matrix, commissions, and back office
+
+**Week 4:**
+- [ ] Matrix position calculation logic
+- [ ] Spillover algorithm
+- [ ] Commission calculation engine
+- [ ] Retail commissions
+- [ ] Matrix bonuses (9 levels)
+
+**Week 5:**
+- [ ] Matching bonuses
+- [ ] Rank system implementation
+- [ ] Genealogy tree view (visual)
+- [ ] Team stats dashboard
+
+**Week 6:**
+- [ ] Replicated site customization
+- [ ] Photo approval workflow
+- [ ] Autoship management
+- [ ] Tax form collection
+
+### Phase 3: Admin Panel (Weeks 7-8)
+**Goal:** Corporate control and management
+
+**Week 7:**
+- [ ] Admin authentication/authorization
+- [ ] Distributor management
+- [ ] Product CRUD
+- [ ] Compensation plan settings
+
+**Week 8:**
+- [ ] Commission approval workflow
+- [ ] Payout processing
+- [ ] Content management
+- [ ] Reports generation
+
+### Phase 4: Polish & Testing (Weeks 9-10)
+**Goal:** Production-ready application
+
+**Week 9:**
+- [ ] UI/UX refinements
+- [ ] Animations and transitions
+- [ ] Mobile responsiveness
+- [ ] Performance optimization
+
+**Week 10:**
+- [ ] Integration testing
+- [ ] E2E testing
+- [ ] Load testing
+- [ ] Security audit
+- [ ] Documentation
+
+### Phase 5: Deployment & Launch (Week 11)
+**Goal:** Go live
+
+- [ ] Production database setup
+- [ ] Seed initial data
+- [ ] Deploy to Vercel
+- [ ] Configure domain
+- [ ] Set up monitoring
+- [ ] Launch announcement
+
+---
+
+## Post-MVP Features (Future Roadmap)
+
+### Phase 6: Enhancements
+- [ ] Mobile app (React Native)
+- [ ] Advanced analytics dashboard
+- [ ] Email marketing automation
+- [ ] SMS notifications
+- [ ] Document e-signature integration
+- [ ] Virtual events/webinars
+- [ ] Gamification (badges, leaderboards)
+- [ ] Referral contest system
+
+### Phase 7: Scalability
+- [ ] Multi-language support
+- [ ] Multi-currency support
+- [ ] International compliance
+- [ ] Advanced caching layer
+- [ ] CDN optimization
+- [ ] Database sharding (if needed)
+
+### Phase 8: Advanced Features
+- [ ] AI-powered team coaching
+- [ ] Predictive analytics
+- [ ] Custom training LMS
+- [ ] Integrated CRM
+- [ ] Social media auto-posting
+- [ ] Lead capture funnels
+- [ ] A/B testing framework
+
+---
+
+## Success Metrics
+
+### Business KPIs
+- **Distributor Growth:** 20% month-over-month
+- **Active Distributor Rate:** 60% (with autoship)
+- **Average Order Value:** $150
+- **Customer Lifetime Value:** $500
+- **Retention Rate:** 75% after 6 months
+
+### Technical KPIs
+- **Page Load Time:** < 2 seconds
+- **API Response Time:** < 500ms (p95)
+- **Uptime:** 99.9%
+- **Commission Calculation Time:** < 5 seconds per order
+- **Payout Processing Time:** < 30 minutes for 1000 distributors
+
+### User Experience KPIs
+- **Signup Completion Rate:** > 70%
+- **Dashboard Daily Active Users:** > 40%
+- **Support Ticket Volume:** < 5% of active users
+- **NPS Score:** > 50
+
+---
+
+## Support & Documentation
+
+### User Documentation
+- [ ] Distributor onboarding guide
+- [ ] Back office tutorial videos
+- [ ] Compensation plan explanation
+- [ ] FAQ database
+- [ ] Product training materials
+- [ ] Marketing asset library
+
+### Technical Documentation
+- [ ] API documentation (OpenAPI/Swagger)
+- [ ] Database schema diagrams
+- [ ] Architecture documentation
+- [ ] Deployment runbook
+- [ ] Development setup guide
+- [ ] Contributing guidelines
+
+### Admin Documentation
+- [ ] Admin panel user guide
+- [ ] Payout processing procedures
+- [ ] Content management guide
+- [ ] Compliance checklist
+- [ ] Troubleshooting guide
+
+---
+
+## Risk Mitigation
+
+### Technical Risks
+| Risk | Impact | Probability | Mitigation |
+|------|--------|-------------|------------|
+| Database performance degradation | High | Medium | Implement caching, optimize queries, use materialized views |
+| Stripe payout failures | High | Low | Implement retry logic, manual payout fallback, monitor webhook failures |
+| Commission calculation errors | Critical | Medium | Extensive unit tests, manual spot checks, audit logs |
+| Security breach | Critical | Low | Regular security audits, pen testing, follow OWASP guidelines |
+
+### Business Risks
+| Risk | Impact | Probability | Mitigation |
+|------|--------|-------------|------------|
+| MLM regulatory compliance | Critical | Medium | Legal review, income disclosures, no inventory loading |
+| Distributor churn | High | High | Strong onboarding, training resources, responsive support |
+| Payment processor issues | High | Low | Have backup processor ready, maintain reserves |
+| Negative distributor reviews | Medium | Medium | Excellent support, fair compensation, clear policies |
+
+---
+
+## Budget Estimate
+
+### Development Costs (8-10 weeks)
+- **Development Team:** (Already internal - BotMakers Inc.)
+  - Lead Developer: 400 hours @ $100/hr = $40,000
+  - UI/UX Design: 80 hours @ $75/hr = $6,000
+  
+### Infrastructure Costs (Monthly)
+- Vercel Pro: $20/month
+- Supabase Pro: $25/month
+- Stripe fees: 2.9% + $0.30 per transaction
+- Resend: $20/month (10k emails)
+- Domain: $15/year
+- **Total:** ~$80/month + transaction fees
+
+### Third-Party Services (One-time)
+- Legal review (Terms, Privacy, Disclosures): $2,500
+- Security audit: $3,000
+- **Total:** $5,500
+
+### Grand Total (MVP)
+- Development: $46,000
+- One-time: $5,500
+- Monthly: $80
+- **Total Initial Investment:** $51,580
+
+---
+
+## Approval & Sign-Off
+
+**Stakeholders:**
+- [ ] CEO Approval: _________________ Date: _______
+- [ ] Technical Lead Approval: _________________ Date: _______
+- [ ] Legal Review Complete: _________________ Date: _______
+- [ ] Compliance Review: _________________ Date: _______
+
+**Next Steps:**
+1. Review and approve PRD
+2. Finalize branding assets
+3. Set up development environment
+4. Begin Phase 1 development
+5. Weekly stakeholder updates
+
+---
+
+## Appendix
+
+### A. Glossary
+- **BV (Business Volume):** Point value assigned to products for commission calculations
+- **Forced Matrix:** MLM structure with fixed width (5) and depth (9)
+- **Spillover:** When a sponsor's level is full, new recruits are placed under existing downline
+- **Leg:** One of the 5 branches in a distributor's first level
+- **Upline:** Distributors above you in genealogy
+- **Downline:** Distributors below you in genealogy
+- **Autoship:** Recurring monthly product order
+
+### B. References
+- Stripe Connect Documentation: https://stripe.com/docs/connect
+- Supabase Documentation: https://supabase.com/docs
+- Next.js Documentation: https://nextjs.org/docs
+- MLM Legal Compliance Guide: [Internal document]
+- FTC Business Opportunity Rule: https://www.ftc.gov/business-guidance/resources/business-opportunity-rule
+
+### C. Change Log
+| Version | Date | Changes | Author |
+|---------|------|---------|--------|
+| 1.0 | Nov 21, 2025 | Initial PRD creation | Claude AI |
+
+---
+
+**END OF DOCUMENT**
+
+*This Product Requirements Document is confidential and proprietary to Apex Affinity Group and BotMakers Inc. Unauthorized distribution is prohibited.*
