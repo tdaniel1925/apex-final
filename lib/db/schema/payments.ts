@@ -25,6 +25,13 @@ export const payments = pgTable('payments', {
   commissionIds: text('commission_ids'), // JSON array of commission IDs included
   notes: text('notes'),
 
+  // Retry logic
+  retryCount: integer('retry_count').notNull().default(0),
+  lastRetryAt: timestamp('last_retry_at'),
+  nextRetryAt: timestamp('next_retry_at'),
+  maxRetries: integer('max_retries').notNull().default(3),
+  requiresManualReview: integer('requires_manual_review').notNull().default(0), // 0 = false, 1 = true (using integer for PostgreSQL compatibility)
+
   // Timestamps
   processedAt: timestamp('processed_at'),
   completedAt: timestamp('completed_at'),

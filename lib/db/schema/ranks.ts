@@ -46,3 +46,14 @@ export const userRanks = pgTable('user_ranks', {
 
   createdAt: timestamp('created_at').notNull().defaultNow(),
 })
+
+// Alias for backwards compatibility
+export const rankAchievements = pgTable('rank_achievements', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  rankName: varchar('rank_name', { length: 100 }).notNull(),
+  achievedAt: timestamp('achieved_at').notNull().defaultNow(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+})
